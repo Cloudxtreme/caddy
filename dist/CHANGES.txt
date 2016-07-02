@@ -1,8 +1,81 @@
 CHANGES
 
-0.8 beta
-- Let's Encrypt (free, automatic, fully-managed HTTPS for your sites)
-- Graceful restarts (for POSIX-compatible systems)
+0.9 beta 2 (June 22, 2016)
+- New core
+- New experimental QUIC support with -quic flag (HTTPS only)
+- New -type flag to specify other server types
+- Moved ~/.caddy/letsencrypt to ~/.caddy/acme and reorganized assets
+- Moved caddy package to top level folder, and pushed main to subfolder
+- Site addresses can have paths
+- Site addresses can make some use of wildcards in domains
+- Renamed -directives flag to -plugins
+- Restarting no longer requires spawning a new process
+- Removed -restart option
+- log: New {request} placeholder to dump entire request (sans body)
+- markdown: Overhauled; removed site generation features
+- proxy: More control of headers
+- proxy: Specify multiple upstreams with optional port ranges
+- proxy: New preset 'transparent' to simplify common pass-thrus
+- tls: Generate self-signed certificates in memory
+- tls: Support for ACME DNS challenge with 10 providers
+- tls: Support for TLS-SNI challenge during restarts
+- Various bug fixes and enhancements
+
+
+0.8.3 (April 26, 2016)
+- Built with Go 1.6.2
+- New pprof middleware for exposing process profiling endpoints
+- New expvar middleware for exposing memory/GC performance
+- New -restart option to force in-process restarts on Unix systems
+- Only fail to start if managed certificate is expired (issue #642)
+- Toggle case-sensitive path matching with environment variable
+- File server now adds ETag header for static files
+- browse: Replace .LinkedPath action with .BreadcrumbMap
+- fastcgi: New except clause to exclude paths
+- proxy: New max_conns setting to limit max connections per upstream
+- proxy: New replaceable value for name of upstream host
+- templates: New utility actions for dealing with strings
+- tls: Customize certificate key with key_type (+ECC)
+- tls: Session ticket keys are now rotated
+- Many other minor internal improvements and bug fixes
+
+
+0.8.2 (February 25, 2016)
+- On-demand TLS can obtain certificates during handshakes
+- Built with Go 1.6
+- Process log (-log) is rotated when it gets large
+- Managed certificates get renewed 30 days early instead of just 14
+- fastcgi: Allow scheme prefix before address
+- markdown: Support for definition lists
+- proxy: Allow proxy to insecure HTTPS backends
+- proxy: Support proxy to unix socket
+- rewrite: Status code can be 2xx or 4xx
+- templates: New .Markdown action to interpret included file as Markdown
+- templates: .Truncate now truncates from end of string when length is negative
+- tls: Set hard limit for certificates obtained with on-demand TLS
+- tls: Load certificates from directory
+- tls: Add SHA384 cipher suites
+- Multiple bug fixes and internal changes
+
+
+0.8.1 (January 12, 2016)
+- Improved OCSP stapling
+- Better graceful reload when new hosts need certificates from Let's Encrypt
+- Current pidfile is now deleted when Caddy exits
+- browse: New default template
+- gzip: Added min_length setting
+- import: Support for glob patterns (*) to import multiple files
+- rewrite: New complex rules with conditions, regex captures, and status code
+- tls: Removed DES ciphers from default cipher suite list
+- tls: All supported certificates are OCSP-stapled
+- tls: Allow custom configuration without specifying certificate and key
+- tls: No longer allow HTTPS over port 80
+- Dozens of bug fixes, improvements, and more tests across the board
+
+
+0.8 (December 4, 2015)
+- HTTPS by default via Let's Encrypt (certs & keys are fully managed)
+- Graceful restarts (on POSIX-compliant systems)
 - Major internal refactoring to allow use of Caddy as library
 - New directive 'mime' to customize Content-Type based on file extension
 - New -accept flag to accept Let's Encrypt SA without prompt
@@ -14,6 +87,7 @@ CHANGES
 - New -grace flag to customize the graceful shutdown timeout
 - New support for SIGHUP, SIGTERM, and SIGQUIT signals
 - browse: Render filenames with multiple whitespace properly
+- core: Use environment variables in Caddyfile
 - markdown: Include Last-Modified header in response
 - markdown: Render tables, strikethrough, and fenced code blocks
 - proxy: Ability to exclude/ignore paths from proxying
@@ -99,7 +173,7 @@ CHANGES
 - tls: Client authentication
 
 
-0.7.0 (May 25, 2015)
+0.7 (May 25, 2015)
 - New directive 'internal' to protect resources with X-Accel-Redirect
 - New -version flag to show program name and version
 - core: Fixed escaped backslash characters inside quoted strings
@@ -117,7 +191,7 @@ CHANGES
 - Other internal improvements that are not user-facing (more tests, etc.)
 
 
-0.6.0 (May 7, 2015)
+0.6 (May 7, 2015)
 - New directive 'git' to automatically pull changes
 - New directive 'bind' to override host server binds to
 - New -root flag to specify root path to default site
@@ -152,5 +226,5 @@ CHANGES
 - fastcgi: Fix for handling errors that come from responder
 
 
-0.5.0 (April 28, 2015)
+0.5 (April 28, 2015)
 - Initial release
