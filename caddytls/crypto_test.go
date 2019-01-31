@@ -1,133 +1,47 @@
+// Copyright 2015 Light Code Labs, LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package caddytls
 
 import (
-	"bytes"
-	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/tls"
-	"crypto/x509"
-	"os"
-	"runtime"
 	"testing"
 	"time"
 )
 
-func TestSaveAndLoadRSAPrivateKey(t *testing.T) {
-	keyFile := "test.key"
-	defer os.Remove(keyFile)
-
-	privateKey, err := rsa.GenerateKey(rand.Reader, 128) // make tests faster; small key size OK for testing
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// test save
-	err = savePrivateKey(privateKey, keyFile)
-	if err != nil {
-		t.Fatal("error saving private key:", err)
-	}
-
-	// it doesn't make sense to test file permission on windows
-	if runtime.GOOS != "windows" {
-		// get info of the key file
-		info, err := os.Stat(keyFile)
-		if err != nil {
-			t.Fatal("error stating private key:", err)
-		}
-		// verify permission of key file is correct
-		if info.Mode().Perm() != 0600 {
-			t.Error("Expected key file to have permission 0600, but it wasn't")
-		}
-	}
-
-	// test load
-	loadedKey, err := loadPrivateKey(keyFile)
-	if err != nil {
-		t.Error("error loading private key:", err)
-	}
-
-	// verify loaded key is correct
-	if !PrivateKeysSame(privateKey, loadedKey) {
-		t.Error("Expected key bytes to be the same, but they weren't")
-	}
-}
-
-func TestSaveAndLoadECCPrivateKey(t *testing.T) {
-	keyFile := "test.key"
-	defer os.Remove(keyFile)
-
-	privateKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// test save
-	err = savePrivateKey(privateKey, keyFile)
-	if err != nil {
-		t.Fatal("error saving private key:", err)
-	}
-
-	// it doesn't make sense to test file permission on windows
-	if runtime.GOOS != "windows" {
-		// get info of the key file
-		info, err := os.Stat(keyFile)
-		if err != nil {
-			t.Fatal("error stating private key:", err)
-		}
-		// verify permission of key file is correct
-		if info.Mode().Perm() != 0600 {
-			t.Error("Expected key file to have permission 0600, but it wasn't")
-		}
-	}
-
-	// test load
-	loadedKey, err := loadPrivateKey(keyFile)
-	if err != nil {
-		t.Error("error loading private key:", err)
-	}
-
-	// verify loaded key is correct
-	if !PrivateKeysSame(privateKey, loadedKey) {
-		t.Error("Expected key bytes to be the same, but they weren't")
-	}
-}
-
-// PrivateKeysSame compares the bytes of a and b and returns true if they are the same.
-func PrivateKeysSame(a, b crypto.PrivateKey) bool {
-	return bytes.Equal(PrivateKeyBytes(a), PrivateKeyBytes(b))
-}
-
-// PrivateKeyBytes returns the bytes of DER-encoded key.
-func PrivateKeyBytes(key crypto.PrivateKey) []byte {
-	var keyBytes []byte
-	switch key := key.(type) {
-	case *rsa.PrivateKey:
-		keyBytes = x509.MarshalPKCS1PrivateKey(key)
-	case *ecdsa.PrivateKey:
-		keyBytes, _ = x509.MarshalECPrivateKey(key)
-	}
-	return keyBytes
-}
-
 func TestStandaloneTLSTicketKeyRotation(t *testing.T) {
+	type syncPkt struct {
+		ticketKey [32]byte
+		keysInUse int
+	}
+
 	tlsGovChan := make(chan struct{})
 	defer close(tlsGovChan)
-	callSync := make(chan bool, 1)
-	defer close(callSync)
+	callSync := make(chan syncPkt)
 
+	setSessionTicketKeysTestHookMu.Lock()
 	oldHook := setSessionTicketKeysTestHook
 	defer func() {
+		setSessionTicketKeysTestHookMu.Lock()
 		setSessionTicketKeysTestHook = oldHook
+		setSessionTicketKeysTestHookMu.Unlock()
 	}()
-	var keysInUse [][32]byte
 	setSessionTicketKeysTestHook = func(keys [][32]byte) [][32]byte {
-		keysInUse = keys
-		callSync <- true
+		callSync <- syncPkt{keys[0], len(keys)}
 		return keys
 	}
+	setSessionTicketKeysTestHookMu.Unlock()
 
 	c := new(tls.Config)
 	timer := time.NewTicker(time.Millisecond * 1)
@@ -138,20 +52,20 @@ func TestStandaloneTLSTicketKeyRotation(t *testing.T) {
 	var lastTicketKey [32]byte
 	for {
 		select {
-		case <-callSync:
-			if lastTicketKey == keysInUse[0] {
+		case pkt := <-callSync:
+			if lastTicketKey == pkt.ticketKey {
 				close(tlsGovChan)
 				t.Errorf("The same TLS ticket key has been used again (not rotated): %x.", lastTicketKey)
 				return
 			}
-			lastTicketKey = keysInUse[0]
+			lastTicketKey = pkt.ticketKey
 			rounds++
-			if rounds <= NumTickets && len(keysInUse) != rounds {
+			if rounds <= NumTickets && pkt.keysInUse != rounds {
 				close(tlsGovChan)
-				t.Errorf("Expected TLS ticket keys in use: %d; Got instead: %d.", rounds, len(keysInUse))
+				t.Errorf("Expected TLS ticket keys in use: %d; Got instead: %d.", rounds, pkt.keysInUse)
 				return
 			}
-			if c.SessionTicketsDisabled == true {
+			if c.SessionTicketsDisabled {
 				t.Error("Session tickets have been disabled unexpectedly.")
 				return
 			}

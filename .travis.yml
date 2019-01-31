@@ -1,11 +1,17 @@
 language: go
 
+addons:
+  hosts:
+    - quic.clemente.io
+
 go:
-  - 1.6.2
+  - 1.x
   - tip
 
-env:
-  - CGO_ENABLED=0
+matrix:
+  allow_failures:
+    - go: tip
+  fast_finish: true
 
 before_install:
   # Decrypts a script that installs an authenticated cookie
@@ -17,14 +23,15 @@ before_install:
 install:
   - if [ "$TRAVIS_PULL_REQUEST" = "false" ]; then bash dist/gitcookie.sh; fi
   - go get -t ./...
-  - go get github.com/golang/lint/golint
-  - go get github.com/gordonklaus/ineffassign
+  - go get golang.org/x/lint/golint
+  - go get github.com/FiloSottile/vendorcheck
+  - go get github.com/alecthomas/gometalinter
 
 script:
-  - diff <(echo -n) <(gofmt -s -d .)
-  - ineffassign .
-  - go vet ./...
-  - go test ./...
+  - gometalinter --install
+  - gometalinter --disable-all -E vet -E gofmt -E misspell -E ineffassign -E goimports -E deadcode --tests --vendor ./...
+  - vendorcheck ./...
+  - go test -race ./...
 
 after_script:
   - golint ./...

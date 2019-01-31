@@ -1,8 +1,21 @@
+// Copyright 2015 Light Code Labs, LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package rewrite
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/mholt/caddy"
@@ -36,17 +49,16 @@ func setup(c *caddy.Controller) error {
 	return nil
 }
 
-func rewriteParse(c *caddy.Controller) ([]Rule, error) {
-	var simpleRules []Rule
-	var regexpRules []Rule
+func rewriteParse(c *caddy.Controller) ([]httpserver.HandlerConfig, error) {
+	var rules []httpserver.HandlerConfig
 
 	for c.Next() {
 		var rule Rule
 		var err error
 		var base = "/"
 		var pattern, to string
-		var status int
 		var ext []string
+		var negate bool
 
 		args := c.RemainingArgs()
 
@@ -58,12 +70,15 @@ func rewriteParse(c *caddy.Controller) ([]Rule, error) {
 			fallthrough
 		case 0:
 			// Integrate request matcher for 'if' conditions.
-			matcher, err = httpserver.SetupIfMatcher(c.Dispenser)
+			matcher, err = httpserver.SetupIfMatcher(c)
 			if err != nil {
 				return nil, err
 			}
-		block:
+
 			for c.NextBlock() {
+				if httpserver.IfMatcherKeyword(c) {
+					continue
+				}
 				switch c.Val() {
 				case "r", "regexp":
 					if !c.NextArg() {
@@ -82,38 +97,33 @@ func rewriteParse(c *caddy.Controller) ([]Rule, error) {
 						return nil, c.ArgErr()
 					}
 					ext = args1
-				case "status":
-					if !c.NextArg() {
-						return nil, c.ArgErr()
-					}
-					status, _ = strconv.Atoi(c.Val())
-					if status < 200 || (status > 299 && status < 400) || status > 499 {
-						return nil, c.Err("status must be 2xx or 4xx")
-					}
 				default:
-					if httpserver.IfMatcherKeyword(c.Val()) {
-						continue block
-					}
 					return nil, c.ArgErr()
 				}
 			}
-			// ensure to or status is specified
-			if to == "" && status == 0 {
+			// ensure to is specified
+			if to == "" {
 				return nil, c.ArgErr()
 			}
-			if rule, err = NewComplexRule(base, pattern, to, status, ext, matcher); err != nil {
+			if rule, err = NewComplexRule(base, pattern, to, ext, matcher); err != nil {
 				return nil, err
 			}
-			regexpRules = append(regexpRules, rule)
+			rules = append(rules, rule)
 
 		// the only unhandled case is 2 and above
 		default:
-			rule = NewSimpleRule(args[0], strings.Join(args[1:], " "))
-			simpleRules = append(simpleRules, rule)
+			if args[0] == "not" {
+				negate = true
+				args = args[1:]
+			}
+			rule, err = NewSimpleRule(args[0], strings.Join(args[1:], " "), negate)
+			if err != nil {
+				return nil, err
+			}
+			rules = append(rules, rule)
 		}
 
 	}
 
-	// put simple rules in front to avoid regexp computation for them
-	return append(simpleRules, regexpRules...), nil
+	return rules, nil
 }

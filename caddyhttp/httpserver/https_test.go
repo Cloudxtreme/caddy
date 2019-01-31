@@ -1,83 +1,132 @@
+// Copyright 2015 Light Code Labs, LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package httpserver
 
 import (
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/mholt/caddy/caddytls"
+	"github.com/mholt/certmagic"
 )
 
 func TestRedirPlaintextHost(t *testing.T) {
-	cfg := redirPlaintextHost(&SiteConfig{
-		Addr: Address{
-			Host: "example.com",
+	for i, testcase := range []struct {
+		Host        string // used for the site config
+		Port        string
+		ListenHost  string
+		RequestHost string // if different from Host
+	}{
+		{
+			Host: "foohost",
+		},
+		{
+			Host: "foohost",
+			Port: "80",
+		},
+		{
+			Host: "foohost",
 			Port: "1234",
 		},
-		ListenHost: "93.184.216.34",
-		TLS:        new(caddytls.Config),
-	})
+		{
+			Host:       "foohost",
+			ListenHost: "93.184.216.34",
+		},
+		{
+			Host:       "foohost",
+			Port:       "1234",
+			ListenHost: "93.184.216.34",
+		},
+		{
+			Host: "foohost",
+			Port: HTTPSPort, // since this is the 'default' HTTPS port, should not be included in Location value
+		},
+		{
+			Host:        "*.example.com",
+			RequestHost: "foo.example.com",
+		},
+		{
+			Host:        "*.example.com",
+			Port:        "1234",
+			RequestHost: "foo.example.com:1234",
+		},
+	} {
+		cfg := redirPlaintextHost(&SiteConfig{
+			Addr: Address{
+				Host: testcase.Host,
+				Port: testcase.Port,
+			},
+			ListenHost: testcase.ListenHost,
+			TLS:        new(caddytls.Config),
+		})
 
-	// Check host and port
-	if actual, expected := cfg.Addr.Host, "example.com"; actual != expected {
-		t.Errorf("Expected redir config to have host %s but got %s", expected, actual)
-	}
-	if actual, expected := cfg.ListenHost, "93.184.216.34"; actual != expected {
-		t.Errorf("Expected redir config to have bindhost %s but got %s", expected, actual)
-	}
-	if actual, expected := cfg.Addr.Port, "80"; actual != expected {
-		t.Errorf("Expected redir config to have port '%s' but got '%s'", expected, actual)
-	}
+		// Check host and port
+		if actual, expected := cfg.Addr.Host, testcase.Host; actual != expected {
+			t.Errorf("Test %d: Expected redir config to have host %s but got %s", i, expected, actual)
+		}
+		if actual, expected := cfg.ListenHost, testcase.ListenHost; actual != expected {
+			t.Errorf("Test %d: Expected redir config to have bindhost %s but got %s", i, expected, actual)
+		}
+		if actual, expected := cfg.Addr.Port, HTTPPort; actual != expected {
+			t.Errorf("Test %d: Expected redir config to have port '%s' but got '%s'", i, expected, actual)
+		}
 
-	// Make sure redirect handler is set up properly
-	if cfg.middleware == nil || len(cfg.middleware) != 1 {
-		t.Fatalf("Redir config middleware not set up properly; got: %#v", cfg.middleware)
-	}
+		// Make sure redirect handler is set up properly
+		if cfg.middleware == nil || len(cfg.middleware) != 1 {
+			t.Fatalf("Test %d: Redir config middleware not set up properly; got: %#v", i, cfg.middleware)
+		}
 
-	handler := cfg.middleware[0](nil)
+		handler := cfg.middleware[0](nil)
 
-	// Check redirect for correctness
-	rec := httptest.NewRecorder()
-	req, err := http.NewRequest("GET", "http://foo/bar?q=1", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err := handler.ServeHTTP(rec, req)
-	if status != 0 {
-		t.Errorf("Expected status return to be 0, but was %d", status)
-	}
-	if err != nil {
-		t.Errorf("Expected returned error to be nil, but was %v", err)
-	}
-	if rec.Code != http.StatusMovedPermanently {
-		t.Errorf("Expected status %d but got %d", http.StatusMovedPermanently, rec.Code)
-	}
-	if got, want := rec.Header().Get("Location"), "https://foo:1234/bar?q=1"; got != want {
-		t.Errorf("Expected Location: '%s' but got '%s'", want, got)
-	}
+		// Check redirect for correctness, first by inspecting error and status code
+		requestHost := testcase.Host // hostname of request might be different than in config (e.g. wildcards)
+		if testcase.RequestHost != "" {
+			requestHost = testcase.RequestHost
+		}
+		rec := httptest.NewRecorder()
+		req, err := http.NewRequest("GET", "http://"+requestHost+"/bar?q=1", nil)
+		if err != nil {
+			t.Fatalf("Test %d: %v", i, err)
+		}
+		status, err := handler.ServeHTTP(rec, req)
+		if status != 0 {
+			t.Errorf("Test %d: Expected status return to be 0, but was %d", i, status)
+		}
+		if err != nil {
+			t.Errorf("Test %d: Expected returned error to be nil, but was %v", i, err)
+		}
+		if rec.Code != http.StatusMovedPermanently {
+			t.Errorf("Test %d: Expected status %d but got %d", http.StatusMovedPermanently, i, rec.Code)
+		}
 
-	// browsers can infer a default port from scheme, so make sure the port
-	// doesn't get added in explicitly for default ports like 443 for https.
-	cfg = redirPlaintextHost(&SiteConfig{Addr: Address{Host: "example.com", Port: "443"}, TLS: new(caddytls.Config)})
-	handler = cfg.middleware[0](nil)
-
-	rec = httptest.NewRecorder()
-	req, err = http.NewRequest("GET", "http://foo/bar?q=1", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, err = handler.ServeHTTP(rec, req)
-	if status != 0 {
-		t.Errorf("Expected status return to be 0, but was %d", status)
-	}
-	if err != nil {
-		t.Errorf("Expected returned error to be nil, but was %v", err)
-	}
-	if rec.Code != http.StatusMovedPermanently {
-		t.Errorf("Expected status %d but got %d", http.StatusMovedPermanently, rec.Code)
-	}
-	if got, want := rec.Header().Get("Location"), "https://foo/bar?q=1"; got != want {
-		t.Errorf("Expected Location: '%s' but got '%s'", want, got)
+		// Now check the Location value. It should mirror the hostname and port of the request
+		// unless the port is redundant, in which case it should be dropped.
+		locationHost, _, err := net.SplitHostPort(requestHost)
+		if err != nil {
+			locationHost = requestHost
+		}
+		expectedLoc := fmt.Sprintf("https://%s/bar?q=1", locationHost)
+		if testcase.Port != "" && testcase.Port != DefaultHTTPSPort {
+			expectedLoc = fmt.Sprintf("https://%s:%s/bar?q=1", locationHost, testcase.Port)
+		}
+		if got, want := rec.Header().Get("Location"), expectedLoc; got != want {
+			t.Errorf("Test %d: Expected Location: '%s' but got '%s'", i, want, got)
+		}
 	}
 }
 
@@ -127,7 +176,7 @@ func TestMakePlaintextRedirects(t *testing.T) {
 
 func TestEnableAutoHTTPS(t *testing.T) {
 	configs := []*SiteConfig{
-		{Addr: Address{Host: "example.com"}, TLS: &caddytls.Config{Managed: true}},
+		{Addr: Address{Host: "example.com"}, TLS: &caddytls.Config{Managed: true, Manager: &certmagic.Config{}}},
 		{}, // not managed - no changes!
 	}
 
@@ -148,18 +197,18 @@ func TestEnableAutoHTTPS(t *testing.T) {
 func TestMarkQualifiedForAutoHTTPS(t *testing.T) {
 	// TODO: caddytls.TestQualifiesForManagedTLS and this test share nearly the same config list...
 	configs := []*SiteConfig{
-		{Addr: Address{Host: ""}, TLS: new(caddytls.Config)},
-		{Addr: Address{Host: "localhost"}, TLS: new(caddytls.Config)},
-		{Addr: Address{Host: "123.44.3.21"}, TLS: new(caddytls.Config)},
-		{Addr: Address{Host: "example.com"}, TLS: new(caddytls.Config)},
+		{Addr: Address{Host: ""}, TLS: newManagedConfig()},
+		{Addr: Address{Host: "localhost"}, TLS: newManagedConfig()},
+		{Addr: Address{Host: "123.44.3.21"}, TLS: newManagedConfig()},
+		{Addr: Address{Host: "example.com"}, TLS: newManagedConfig()},
 		{Addr: Address{Host: "example.com"}, TLS: &caddytls.Config{Manual: true}},
 		{Addr: Address{Host: "example.com"}, TLS: &caddytls.Config{ACMEEmail: "off"}},
-		{Addr: Address{Host: "example.com"}, TLS: &caddytls.Config{ACMEEmail: "foo@bar.com"}},
-		{Addr: Address{Host: "example.com", Scheme: "http"}, TLS: new(caddytls.Config)},
-		{Addr: Address{Host: "example.com", Port: "80"}, TLS: new(caddytls.Config)},
-		{Addr: Address{Host: "example.com", Port: "1234"}, TLS: new(caddytls.Config)},
-		{Addr: Address{Host: "example.com", Scheme: "https"}, TLS: new(caddytls.Config)},
-		{Addr: Address{Host: "example.com", Port: "80", Scheme: "https"}, TLS: new(caddytls.Config)},
+		{Addr: Address{Host: "example.com"}, TLS: &caddytls.Config{ACMEEmail: "foo@bar.com", Manager: &certmagic.Config{}}},
+		{Addr: Address{Host: "example.com", Scheme: "http"}, TLS: newManagedConfig()},
+		{Addr: Address{Host: "example.com", Port: "80"}, TLS: newManagedConfig()},
+		{Addr: Address{Host: "example.com", Port: "1234"}, TLS: newManagedConfig()},
+		{Addr: Address{Host: "example.com", Scheme: "https"}, TLS: newManagedConfig()},
+		{Addr: Address{Host: "example.com", Port: "80", Scheme: "https"}, TLS: newManagedConfig()},
 	}
 	expectedManagedCount := 4
 
@@ -175,4 +224,8 @@ func TestMarkQualifiedForAutoHTTPS(t *testing.T) {
 	if count != expectedManagedCount {
 		t.Errorf("Expected %d managed configs, but got %d", expectedManagedCount, count)
 	}
+}
+
+func newManagedConfig() *caddytls.Config {
+	return &caddytls.Config{Manager: &certmagic.Config{}}
 }

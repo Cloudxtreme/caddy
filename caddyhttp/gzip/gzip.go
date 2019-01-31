@@ -1,14 +1,24 @@
+// Copyright 2015 Light Code Labs, LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 // Package gzip provides a middleware layer that performs
 // gzip compression on the response.
 package gzip
 
 import (
-	"bufio"
 	"compress/gzip"
-	"fmt"
 	"io"
-	"io/ioutil"
-	"net"
 	"net/http"
 	"strings"
 
@@ -21,6 +31,8 @@ func init() {
 		ServerType: "http",
 		Action:     setup,
 	})
+
+	initWriterPool()
 }
 
 // Gzip is a middleware type which gzips HTTP responses. It is
@@ -54,25 +66,31 @@ outer:
 			}
 		}
 
-		// Delete this header so gzipping is not repeated later in the chain
-		r.Header.Del("Accept-Encoding")
-
-		// gzipWriter modifies underlying writer at init,
-		// use a discard writer instead to leave ResponseWriter in
-		// original form.
-		gzipWriter, err := newWriter(c, ioutil.Discard)
-		if err != nil {
-			// should not happen
-			return http.StatusInternalServerError, err
+		// In order to avoid unused memory allocation, gzip.putWriter only be called when gzip compression happened.
+		// see https://github.com/mholt/caddy/issues/2395
+		gz := &gzipResponseWriter{
+			ResponseWriterWrapper: &httpserver.ResponseWriterWrapper{ResponseWriter: w},
+			newWriter: func() io.Writer {
+				// gzipWriter modifies underlying writer at init,
+				// use a discard writer instead to leave ResponseWriter in
+				// original form.
+				return getWriter(c.Level)
+			},
 		}
-		defer gzipWriter.Close()
-		gz := &gzipResponseWriter{Writer: gzipWriter, ResponseWriter: w}
+
+		defer func() {
+			if gzWriter, ok := gz.internalWriter.(*gzip.Writer); ok {
+				putWriter(c.Level, gzWriter)
+			}
+		}()
 
 		var rw http.ResponseWriter
 		// if no response filter is used
 		if len(c.ResponseFilters) == 0 {
 			// replace discard writer with ResponseWriter
-			gzipWriter.Reset(w)
+			if gzWriter, ok := gz.Writer().(*gzip.Writer); ok {
+				gzWriter.Reset(w)
+			}
 			rw = gz
 		} else {
 			// wrap gzip writer with ResponseFilterWriter
@@ -96,22 +114,13 @@ outer:
 	return g.Next.ServeHTTP(w, r)
 }
 
-// newWriter create a new Gzip Writer based on the compression level.
-// If the level is valid (i.e. between 1 and 9), it uses the level.
-// Otherwise, it uses default compression level.
-func newWriter(c Config, w io.Writer) (*gzip.Writer, error) {
-	if c.Level >= gzip.BestSpeed && c.Level <= gzip.BestCompression {
-		return gzip.NewWriterLevel(w, c.Level)
-	}
-	return gzip.NewWriter(w), nil
-}
-
-// gzipResponeWriter wraps the underlying Write method
+// gzipResponseWriter wraps the underlying Write method
 // with a gzip.Writer to compress the output.
 type gzipResponseWriter struct {
-	io.Writer
-	http.ResponseWriter
+	internalWriter io.Writer
+	*httpserver.ResponseWriterWrapper
 	statusCodeWritten bool
+	newWriter         func() io.Writer
 }
 
 // WriteHeader wraps the underlying WriteHeader method to prevent
@@ -122,7 +131,11 @@ func (w *gzipResponseWriter) WriteHeader(code int) {
 	w.Header().Del("Content-Length")
 	w.Header().Set("Content-Encoding", "gzip")
 	w.Header().Add("Vary", "Accept-Encoding")
-	w.ResponseWriter.WriteHeader(code)
+	originalEtag := w.Header().Get("ETag")
+	if originalEtag != "" && !strings.HasPrefix(originalEtag, "W/") {
+		w.Header().Set("ETag", "W/"+originalEtag)
+	}
+	w.ResponseWriterWrapper.WriteHeader(code)
 	w.statusCodeWritten = true
 }
 
@@ -134,34 +147,17 @@ func (w *gzipResponseWriter) Write(b []byte) (int, error) {
 	if !w.statusCodeWritten {
 		w.WriteHeader(http.StatusOK)
 	}
-	n, err := w.Writer.Write(b)
+	n, err := w.Writer().Write(b)
 	return n, err
 }
 
-// Hijack implements http.Hijacker. It simply wraps the underlying
-// ResponseWriter's Hijack method if there is one, or returns an error.
-func (w *gzipResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
-		return hj.Hijack()
+//Writer use a lazy way to initialize Writer
+func (w *gzipResponseWriter) Writer() io.Writer {
+	if w.internalWriter == nil {
+		w.internalWriter = w.newWriter()
 	}
-	return nil, nil, fmt.Errorf("not a Hijacker")
+	return w.internalWriter
 }
 
-// Flush implements http.Flusher. It simply wraps the underlying
-// ResponseWriter's Flush method if there is one, or panics.
-func (w *gzipResponseWriter) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	} else {
-		panic("not a Flusher") // should be recovered at the beginning of middleware stack
-	}
-}
-
-// CloseNotify implements http.CloseNotifier.
-// It just inherits the underlying ResponseWriter's CloseNotify method.
-func (w *gzipResponseWriter) CloseNotify() <-chan bool {
-	if cn, ok := w.ResponseWriter.(http.CloseNotifier); ok {
-		return cn.CloseNotify()
-	}
-	panic("not a CloseNotifier")
-}
+// Interface guards
+var _ httpserver.HTTPInterfaces = (*gzipResponseWriter)(nil)

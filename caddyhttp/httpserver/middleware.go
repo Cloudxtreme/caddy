@@ -1,3 +1,17 @@
+// Copyright 2015 Light Code Labs, LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package httpserver
 
 import (
@@ -5,8 +19,9 @@ import (
 	"net/http"
 	"os"
 	"path"
-	"strings"
 	"time"
+
+	"github.com/mholt/caddy"
 )
 
 func init() {
@@ -19,20 +34,25 @@ type (
 	// passed the next Handler in the chain.
 	Middleware func(Handler) Handler
 
+	// ListenerMiddleware is similar to the Middleware type, except it
+	// chains one net.Listener to the next.
+	ListenerMiddleware func(caddy.Listener) caddy.Listener
+
 	// Handler is like http.Handler except ServeHTTP may return a status
 	// code and/or error.
 	//
-	// If ServeHTTP writes to the response body, it should return a status
-	// code of 0. This signals to other handlers above it that the response
-	// body is already written, and that they should not write to it also.
+	// If ServeHTTP writes the response header, it should return a status
+	// code of 0. This signals to other handlers before it that the response
+	// is already handled, and that they should not write to it also. Keep
+	// in mind that writing to the response body writes the header, too.
 	//
 	// If ServeHTTP encounters an error, it should return the error value
 	// so it can be logged by designated error-handling middleware.
 	//
-	// If writing a response after calling another ServeHTTP method, the
+	// If writing a response after calling the next ServeHTTP method, the
 	// returned status code SHOULD be used when writing the response.
 	//
-	// If handling errors after calling another ServeHTTP method, the
+	// If handling errors after calling the next ServeHTTP method, the
 	// returned error value SHOULD be logged or handled accordingly.
 	//
 	// Otherwise, return values should be propagated down the middleware
@@ -48,18 +68,42 @@ type (
 
 	// RequestMatcher checks to see if current request should be handled
 	// by underlying handler.
-	//
-	// TODO The long term plan is to get all middleware implement this
-	// interface and have validation done before requests are dispatched
-	// to each middleware.
 	RequestMatcher interface {
 		Match(r *http.Request) bool
 	}
+
+	// HandlerConfig is a middleware configuration.
+	// This makes it possible for middlewares to have a common
+	// configuration interface.
+	//
+	// TODO The long term plan is to get all middleware implement this
+	// interface for configurations.
+	HandlerConfig interface {
+		RequestMatcher
+		BasePath() string
+	}
+
+	// ConfigSelector selects a configuration.
+	ConfigSelector []HandlerConfig
 )
 
 // ServeHTTP implements the Handler interface.
 func (f HandlerFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) (int, error) {
 	return f(w, r)
+}
+
+// Select selects a Config.
+// This chooses the config with the longest length.
+func (c ConfigSelector) Select(r *http.Request) (config HandlerConfig) {
+	for i := range c {
+		if !c[i].Match(r) {
+			continue
+		}
+		if config == nil || len(c[i].BasePath()) > len(config.BasePath()) {
+			config = c[i]
+		}
+	}
+	return config
 }
 
 // IndexFile looks for a file in /root/fpath/indexFile for each string
@@ -114,7 +158,7 @@ func SetLastModifiedHeader(w http.ResponseWriter, modTime time.Time) {
 
 // CaseSensitivePath determines if paths should be case sensitive.
 // This is configurable via CASE_SENSITIVE_PATH environment variable.
-var CaseSensitivePath = true
+var CaseSensitivePath = false
 
 const caseSensitivePathEnv = "CASE_SENSITIVE_PATH"
 
@@ -123,26 +167,11 @@ const caseSensitivePathEnv = "CASE_SENSITIVE_PATH"
 // This could have been in init, but init cannot be called from tests.
 func initCaseSettings() {
 	switch os.Getenv(caseSensitivePathEnv) {
-	case "0", "false":
-		CaseSensitivePath = false
-	default:
+	case "1", "true":
 		CaseSensitivePath = true
+	default:
+		CaseSensitivePath = false
 	}
-}
-
-// Path represents a URI path.
-type Path string
-
-// Matches checks to see if other matches p.
-//
-// Path matching will probably not always be a direct
-// comparison; this method assures that paths can be
-// easily and consistently matched.
-func (p Path) Matches(other string) bool {
-	if CaseSensitivePath {
-		return strings.HasPrefix(string(p), other)
-	}
-	return strings.HasPrefix(strings.ToLower(string(p)), strings.ToLower(other))
 }
 
 // MergeRequestMatchers merges multiple RequestMatchers into one.
@@ -182,3 +211,18 @@ var EmptyNext = HandlerFunc(func(w http.ResponseWriter, r *http.Request) (int, e
 func SameNext(next1, next2 Handler) bool {
 	return fmt.Sprintf("%v", next1) == fmt.Sprintf("%v", next2)
 }
+
+// Context key constants.
+const (
+	// ReplacerCtxKey is the context key for a per-request replacer.
+	ReplacerCtxKey caddy.CtxKey = "replacer"
+
+	// RemoteUserCtxKey is the key for the remote user of the request, if any (basicauth).
+	RemoteUserCtxKey caddy.CtxKey = "remote_user"
+
+	// MitmCtxKey is the key for the result of MITM detection
+	MitmCtxKey caddy.CtxKey = "mitm"
+
+	// RequestIDCtxKey is the key for the U4 UUID value
+	RequestIDCtxKey caddy.CtxKey = "request_id"
+)
